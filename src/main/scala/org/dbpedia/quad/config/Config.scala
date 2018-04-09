@@ -94,6 +94,10 @@ class Config(properties: Properties) extends
     */
   lazy val outputDataset: Option[String] = Option(getString(this, "output"))
   /**
+    * Dataset names when there are more than one outputs
+    */
+  lazy val outDatasets: Seq[String] = getStrings(this, "output", ",").distinct
+  /**
     * the suffix of the files representing the input dataset (usually a combination of RDF serialization extension and compression used - e.g. .ttl.bz2 when using the TURTLE triples compressed with bzip2)
     */
   lazy val inputSuffix: String = Option(getString(this, "suffix")).getOrElse("")

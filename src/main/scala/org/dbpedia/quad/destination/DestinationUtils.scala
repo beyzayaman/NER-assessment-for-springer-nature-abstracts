@@ -16,13 +16,18 @@ object DestinationUtils {
     for ((suffix, format) <- formats) {
       if(appendHeader != null)
         format.setHeader(format.header + appendHeader)
-      for (dataset <- datasets) {
-        destination += (if(filterParams == null)
-              new WriterDestination(() => IOUtils.writer(new RichFile(new File(baseDir.getFile, dataset.replace('_', '-') + '.' + suffix))), format)
-            else
-              getDatasetDestination(baseDir, dataset, suffix, format, filterParams)
-          )
-      }
+
+      destination += (if(filterParams == null)
+        new WriterDestination(() => IOUtils.writer(new RichFile(new File(baseDir.getFile, datasets(0).replace('_', '-') + '.' + suffix))), format)
+      else
+        getDatasetDestination(baseDir, datasets(0), suffix, format, filterParams)
+        )
+
+      destination += (if (filterParams == null)
+        new BacklinkDestination(() => IOUtils.writer(new RichFile(new File(baseDir.getFile, datasets(1).replace('_', '-') + '.' + suffix))), format)
+      else
+        getBacklinkDestination(baseDir, datasets(1), suffix, format, filterParams)
+        )
     }
     new CompositeDestination(destination.toSeq: _*)
   }
@@ -38,6 +43,14 @@ object DestinationUtils {
   }
 
   def getDatasetDestination(baseDir: FileLike[_], dataset: String, suffix: String, format: Formatter, filterParams: FilterParams): FilterDestination = {
+    if(filterParams == null)
+      return getDatasetDestination(baseDir, dataset, suffix, format)
+    val file = new RichFile(new File(baseDir.getFile, dataset.replace('_', '-') + '.' + suffix))
+    file.getFile.createNewFile()
+    new FilterDestination(filterParams, new WriterDestination(() => IOUtils.writer(file), format))
+  }
+
+  def getBacklinkDestination(baseDir: FileLike[_], dataset: String, suffix: String, format: Formatter, filterParams: FilterParams): FilterDestination = {
     if(filterParams == null)
       return getDatasetDestination(baseDir, dataset, suffix, format)
     val file = new RichFile(new File(baseDir.getFile, dataset.replace('_', '-') + '.' + suffix))

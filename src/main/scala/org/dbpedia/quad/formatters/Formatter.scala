@@ -17,5 +17,9 @@ trait Formatter
 
   def render(quad: Quad): String
 
+  def renderBacklink(quadRefLink: Quad, quadConf: Quad): String
+
+  def renderMetadata(quad: Quad): String
+
   def serialization: String
 }

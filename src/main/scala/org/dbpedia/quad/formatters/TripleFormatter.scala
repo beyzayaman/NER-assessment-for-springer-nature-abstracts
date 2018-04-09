@@ -23,4 +23,39 @@ extends Formatter
     
     builder.result()
   }
+
+  def renderMetadata(quad: Quad): String = {
+
+    val builder = factory()
+
+    builder.start(quad.context)
+
+    builder.subjectUri(quad.subject)
+
+    builder.predicateUri("http://www.w3.org/ns/prov#hadPrimarySource")
+
+    builder.objectUri(quad.subject.substring(0,quad.subject.indexOf("#")))
+
+    builder.end(quad.context)
+
+    builder.result()
+  }
+
+  def renderBacklink(quadRefLink: Quad, quadConf: Quad): String = {
+
+    val builder = factory()
+
+    builder.start(quadRefLink.context)
+
+    builder.subjectUri(quadRefLink.subject)
+
+    builder.predicateUri("http://schema.org/mentions")
+
+    builder.objectUri(quadRefLink.value)
+
+    builder.end(quadRefLink.subject.substring(0,quadRefLink.subject.indexOf("#")).concat("#nlptool=spotlight&confidence=").concat(quadConf.value))
+
+    builder.result()
+  }
+
 }

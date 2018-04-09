@@ -35,6 +35,12 @@ extends Destination
       writer.write(formatter.render(quad))
       countQuads += 1
     }
+
+    val quadFilter = graph.filter(q => q.value == "http://persistence.uni-leipzig.org/nlp2rdf/ontologies/nif-core#OffsetBasedString")
+    //println(quadFilter)
+    for(quad <- quadFilter) {
+      writer.write(formatter.renderMetadata(quad))
+    }
   }
 
   override def close(): Unit = {
