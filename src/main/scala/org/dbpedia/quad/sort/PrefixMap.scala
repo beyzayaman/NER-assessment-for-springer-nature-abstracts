@@ -1,83 +1,91 @@
 package org.dbpedia.quad.sort
 
+import java.util.Comparator
+
+import org.apache.commons.collections4.trie.PatriciaTrie
 import org.dbpedia.quad.sort.QuadSorter.PrefixRecord
 
 import scala.collection.mutable
+import scala.collection.convert.decorateAsScala._
 
 /**
   * Created by chile on 29.08.17.
   */
-class PrefixMap extends mutable.Map[String, PrefixRecord]{
-  private val prefixMap: mutable.Map[String, PrefixRecord] = mutable.Map[String, PrefixRecord]()
+class PrefixMap extends PatriciaTrie[PrefixRecord] {
 
-
-  override def get(key: String): Option[PrefixRecord] = prefixMap.get(key)
-
-  override def iterator: Iterator[(String, PrefixRecord)] = prefixMap.iterator
-
-
+  private val comp =new CodePointComparator()
+  override def comparator(): Comparator[_ >: String] = comp
 
   def addPrefix(prefix: String, charMap: mutable.Map[Char, Int], redirect: Option[String] = None, split: Boolean = false): Unit = synchronized {
-    if(!prefixMap.keySet.contains(prefix))
-      prefixMap.put(prefix, new PrefixRecord(prefix, prefixMap.size, charMap))
+    if(!this.keySet.contains(prefix))
+      this.put(prefix, new PrefixRecord(prefix, this.size, charMap, redirect, split))
     else{
-      val old = prefixMap(prefix)
-      for(oc <- old.charMap){
-        charMap.get(oc._1) match{
-          case Some(i) => charMap.put(oc._1, oc._2 + i)
-          case None => charMap.put(oc._1, oc._2)
+      val old = this.get(prefix)
+      for((key, value) <- old.charMap){
+        charMap.get(key) match{
+          case Some(i) => charMap.put(key, value + i)
+          case None => charMap.put(key, value)
         }
       }
-      prefixMap.put(prefix, new PrefixRecord(prefix, old.index, charMap, redirect, split))
+      this.put(prefix, new PrefixRecord(prefix, old.index, charMap, redirect, split))
     }
   }
 
   def getPrefix(index: Int): String={
-    prefixMap.find(x => x._2.index == index-1) match{
+    this.asScala.toList.find(x => x._2.index == index-1) match{
       case Some(p) => p._1
       case None => ""
     }
   }
 
-  def getPrefixIndex(prefix: String): Int = prefixMap.get(prefix) match{
+  def getPrefixIndex(prefix: String): Int = Option(this.get(prefix)) match{
     case Some(x) => x.index+1
     case None => 0
   }
 
-  def getPrefixOrder(prefix: String): Int = {
-    val comp =new CodePointComparator()
-    prefixMap.keys.toList.sortWith((x,y) => comp.compare(x,y) < 0).indexWhere(x => prefix ==x)+1
+  def getLongestPrefix(uri: String, skip: String = null): PrefixRecord ={
+    var currentPrefix = if(skip != null) skip else ""
+    if(skip == null){
+      while(this.get(currentPrefix) == null && currentPrefix.length < uri.length)
+        currentPrefix = uri.substring(0, currentPrefix.length+1)
+    }
+    var record: PrefixRecord = this.get(currentPrefix)
+    while(record == null || record.split){
+      currentPrefix = uri.substring(0, currentPrefix.length+1)
+      record = this.get(currentPrefix)
+    }
+    record
   }
 
-  def getLongestPrefix(uri: String): String ={
-    var prefix = ""
-    for(p <- prefixMap.filter(x => x._2.count > 0).keys)
-      if(prefix.length < p.length && uri.contains(p))
-        prefix = p
-    prefix
+  def isContainedIn(prefix: String): List[PrefixRecord]={
+    this.headMap(prefix).asScala.filter(x => x._2.redirect.isEmpty && !x._2.split).values.toList
   }
 
   /**
     * redirects prefixes if necessary
     * @param prefix
     */
-  def resolvePrefix(prefix: String, resource: String): PrefixRecord ={
-    prefixMap.get(prefix) match{
+  def resolvePrefix(prefix: String): (String) => PrefixRecord ={
+    Option(this.get(prefix)) match{
       case Some(p) => p.redirect match{
-        case Some(r) => resolvePrefix(r, resource)
-        case None => if(p.split) resolvePrefix(prefix + resource.trim.substring(prefix.length, prefix.length+1).toUpperCase(), resource) else p
+        case Some(r) => resolvePrefix(r)
+        case None => if(p.split)
+          (resource: String) => {
+            if(!resource.startsWith(p.prefix))
+              throw new IllegalArgumentException("Incompatible resource provided: " + resource + " for prefix " + p.prefix)
+            val newPrefix = p.prefix + resource.substring(p.prefix.length, p.prefix.length+1)
+            this.get(newPrefix)
+          }
+          else
+            (_: String) => p
       }
-      case None => null  //should not happen
+      case None => throw new IllegalStateException("Prefix was not found: " + prefix)  //should not happen
     }
   }
 
-  override def +=(kv: (String, PrefixRecord)): PrefixMap.this.type = {
-    prefixMap += kv
-    this
+  def clearSplitPrefixes(): Unit ={
+    this.asScala.filter(x => x._2.split).keys.foreach(p => this.remove(p))
   }
 
-  override def -=(key: String): PrefixMap.this.type = {
-    prefixMap -= key
-    this
-  }
+  def apply(key: String): PrefixRecord = this.get(key)
 }

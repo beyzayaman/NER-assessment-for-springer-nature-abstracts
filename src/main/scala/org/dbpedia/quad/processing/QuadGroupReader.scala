@@ -2,8 +2,6 @@ package org.dbpedia.quad.processing
 
 import java.io.Closeable
 import java.util.Comparator
-import java.util.concurrent.{ArrayBlockingQueue, PriorityBlockingQueue}
-import java.util.function.ToIntFunction
 
 import org.dbpedia.quad.Quad
 import org.dbpedia.quad.file.{BufferedLineReader, NoMoreLinesException}
@@ -12,27 +10,42 @@ import org.dbpedia.quad.utils.FilterTarget
 
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Promise}
+import scala.concurrent.{Await, Future}
 import scala.util.{Failure, Success}
-
 
 /**
   * Created by chile on 27.08.17.
   */
-class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, checkSorted: Boolean) extends Closeable with Iterator[Promise[Seq[Quad]]] {
+class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, checkSorted: Boolean) extends Closeable with Iterator[Future[Seq[Quad]]] {
 
   def this(blr: BufferedLineReader, target: FilterTarget.Value) = this(blr, target, false)
   def this(blr: BufferedLineReader) = this(blr, FilterTarget.subject, false)
 
   private val comparator = new CodePointComparator()
-  private val tupleComp = Comparator.comparingInt[Tuple2[Int, _]](new ToIntFunction[Tuple2[Int, _]] {
-    override def applyAsInt(t: Tuple2[Int, _]): Int = t._1
-  })
-  private val ne: PriorityBlockingQueue[(Int, Promise[Seq[Quad]])] = new PriorityBlockingQueue[(Int, Promise[Seq[Quad]])](QuadGroupReader.QUEUESIZE, tupleComp)
-  private var putCount = 0
+  private val tupleComp = new Comparator[Future[Seq[Quad]]] {
+    var count = 0
+    private def collectHead(f: Future[Seq[Quad]]): String ={
+      f.value match{
+        case Some(t) => t match {
+          case Success(s: Seq[Quad]) if s.nonEmpty => FilterTarget.resolveQuadResource(s.head, target)
+          case _ => null
+        }
+        case None => null
+      }
+    }
+    val codepointComp = new CodePointComparator()
+    override def compare(t: Future[Seq[Quad]], t1: Future[Seq[Quad]]) = {
+      count = count +1
+      PromisedWork.awaitResults(Seq(t,t1))
+      val head1 = collectHead(t)
+      val head2 = collectHead(t1)
+      codepointComp.compare(head1, head2)
+    }
+  }
 
   private val worker = PromisedWork.apply[String, Seq[Quad]]{ until: String =>
     val buffer = new ListBuffer[Quad]()
+
     val stamp = blr.lockReader()
 
     try {
@@ -60,46 +73,36 @@ class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, c
     finally{
       blr.unlockReader(stamp)
     }
-    buffer.foreach(b => System.out.println(buffer.hashCode() + " - " + b))
     buffer
   }
 
-  for(i <- 0 until QuadGroupReader.QUEUESIZE){
-    try{
-        ne.put((putCount, worker.work(null.asInstanceOf[String])))
-        putCount = putCount+1
-    }
-    catch{
-      case e: Exception => ne.put((putCount, Promise.failed(e)))
-        putCount = putCount+1
-    }
-  }
+  private var peek: Future[Seq[Quad]] = worker.work(null.asInstanceOf[String]).future
 
-  def readGroup(): Promise[Seq[Quad]] ={
+  def readGroup(): Future[Seq[Quad]] ={
     try {
       pollAndPut()
     }
     catch{
-      case e: Exception => Promise.failed(e)
+      case e: Exception => Future.failed(e)
     }
   }
 
-  def readGroup(targetValue: String): Promise[Seq[Quad]] ={
-    var ret: Promise[Seq[Quad]] = null
+  def readGroup(targetValue: String): Future[Seq[Quad]] ={
+    var ret: Future[Seq[Quad]] = null
     try {
       ret = peekGroup() match{
         case Some(p) => p
-        case None => Promise.failed(new NoMoreLinesException)
+        case None => Future.failed(new NoMoreLinesException)
       }
       var compVal = resolvePromise(ret).headOption match{
         case Some(h) => comparator.compare(FilterTarget.resolveQuadResource(h, target), targetValue)
         case None => 1
       }
       while (compVal < 0) {
-        pollAndPut()
+        pollAndPut()          //discard the current head (since it before the target values)
         ret = peekGroup() match{
           case Some(p) => p
-          case None => Promise.failed(new NoMoreLinesException)
+          case None => Future.failed(new NoMoreLinesException)
         }
         compVal = resolvePromise(ret).headOption match{
           case Some(h) => comparator.compare(FilterTarget.resolveQuadResource(h, target), targetValue)
@@ -107,33 +110,26 @@ class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, c
         }
       }
       if(compVal > 0)
-        ret = Promise.successful(Seq())     //we found no quad with the target value
+        ret = Future.successful(Seq())     //we found no quad with the target value
       else
-        ret = pollAndPut()
+        ret = pollAndPut()                //
     }
     catch{
-      case e: Exception => ret = Promise.failed(e)
+      case e: Exception => ret = Future.failed(e)
     }
     ret
   }
 
-  def peekGroup(): Option[Promise[Seq[Quad]]] = {
-    if(ne.isEmpty)
-      None
-    else
-      Some(ne.peek()._2)
+  def peekGroup(): Option[Future[Seq[Quad]]] = {
+    Option(this.peek)
   }
 
   def linesRead(): Int = blr.getLineCount
 
-  private def pollAndPut(): Promise[Seq[Quad]] = {
-    var ret = ne.poll()._2
-    ne.put((putCount, worker.work(null)))
-    putCount = putCount+1
-    if(ret == null)
-      ret = Promise.failed(new QueueEmptyException)
-    Await.ready(ret.future, Duration.Inf)
-    //ret.future.map(x => x.foreach(b => System.out.println(b)))
+  private def pollAndPut(): Future[Seq[Quad]] = {
+    val ret = peek
+    this.peek = worker.work(null.asInstanceOf[String]).future
+    Await.ready(ret, Duration.Inf)
     ret
   }
 
@@ -142,8 +138,8 @@ class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, c
   override def hasNext: Boolean = {
     peekGroup() match{
       case Some(x) =>
-        Await.ready(x.future, Duration.Inf)
-        x.future.value.get match{
+        Await.ready(x, Duration.Inf)
+        x.value.get match{
           case Success(s) => true
           case Failure(f) => f match {
             case t : NoMoreLinesException => false
@@ -157,8 +153,8 @@ class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, c
   def hasSuccessfullNext: Boolean ={
     peekGroup() match{
       case Some(x) =>
-        Await.ready(x.future, Duration.Inf)
-        x.future.value.get match{
+        Await.ready(x, Duration.Inf)
+        x.value.get match{
           case Success(s) => true
           case Failure(f) => false
         }
@@ -166,15 +162,15 @@ class QuadGroupReader(val blr: BufferedLineReader, target: FilterTarget.Value, c
     }
   }
 
-  override def next(): Promise[Seq[Quad]] = readGroup()
+  override def next(): Future[Seq[Quad]] = readGroup()
 
-  private def resolvePromise(promise: Promise[Seq[Quad]]): Traversable[Quad] = {
-    PromisedWork.awaitResults[Seq[Quad]](Seq(promise.future)).flatten
+  private def resolvePromise(future: Future[Seq[Quad]]): Traversable[Quad] = {
+    PromisedWork.awaitResults[Seq[Quad]](Seq(future)).flatten
   }
 }
 
 object QuadGroupReader{
-  private val QUEUESIZE = 1000
+  private val QUEUESIZE = 100
 
   /**
     * transforms a given line from a reader into a Quad, skips over non-quad lines (comments, empty etc.)

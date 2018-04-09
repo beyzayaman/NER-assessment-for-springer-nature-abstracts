@@ -1,7 +1,6 @@
 package org.dbpedia.quad.file
 
 import java.io._
-import java.net.URL
 import java.nio.charset.Charset
 import java.util.zip.{GZIPInputStream, GZIPOutputStream, Inflater, InflaterInputStream}
 
@@ -9,6 +8,8 @@ import org.apache.commons.compress.compressors.bzip2.{BZip2CompressorInputStream
 
 import scala.io.Codec
 import scala.util.{Failure, Success, Try}
+
+import RichFile._
 
 /**
  * TODO: modify the bzip code such that there are no run-time dependencies on commons-compress.
@@ -78,17 +79,72 @@ object IOUtils {
     1000000/compressedBytes
   }
 
+  def forceFileDelete(files: File*): Unit ={
+    for(f <- files){
+      if(f.isDirectory)
+        forceFileDelete(f.getFile.listFiles():_*)
+      f.setWritable(true)
+      f.delete()
+    }
+  }
+
   /**
     * a simple concatenation of files with bash - cat also allows for concatenating compressed files
     * @param files
     * @param outFile
     */
-  def concatFile(files: Seq[FileLike[_]], outFile: FileLike[_]): Boolean = {
+  def concatFile(files: Seq[FileLike[_]], outFile: FileLike[_], tempDirectory: Option[File] = None): Boolean = {
+    if(files.size > 100){
+      var c = 0
+      val tempDir = tempDirectory match{
+        case Some(d) => d
+        case None => new File(outFile.toString.substring(0, outFile.toString.lastIndexOf("/")+1))
+      }
+      if(! tempDir.exists)
+        throw new IllegalArgumentException("The following directory does not exist: " + tempDir)
+      val tempFiles = for(tf <- files.grouped(100))
+        yield {
+          c = c+1
+          val tmpFile = new RichFile(new File(tempDir, "cat" + c + ".tmp"))
+          concatFileInternal(tf, tmpFile)
+          tmpFile
+        }
+      val ret = concatFileInternal(tempFiles.toSeq, outFile)
+      forceFileDelete(Array(tempFiles.toList:_*).map(_.getFile):_*)
+      ret
+    }
+    else
+      concatFileInternal(files, outFile)
+  }
+
+  /**
+    * a simple concatenation of files with bash - cat also allows for concatenating compressed files
+    * @param files
+    * @param outFile
+    */
+  private def concatFileInternal(files: Seq[FileLike[_]], outFile: FileLike[_]): Boolean = {
     var command = "cat "
     for(i <- files.indices)
       command += files(i).getFile.getAbsolutePath + " "
     command += "> " + outFile.getFile.getAbsolutePath
     val camArray = collection.JavaConversions.seqAsJavaList(List( "/bin/bash", "-c", command ))
+    val pb = new ProcessBuilder(camArray)
+    val ret = Integer.valueOf(pb.start().waitFor())
+    ret == 0
+  }
+
+  /**
+    * Will sort a given file in parallel
+    * @param file
+    * @param outFile
+    * @return
+    */
+  def sortFile(file: FileLike[_], outFile: FileLike[_]): Boolean ={
+    val sortCommand = "bzip2 -cd \"" + file.getFile.getAbsolutePath +
+      "\" | sort --parallel=8 --batch-size=512 --buffer-size=50% |  parallel --pipe --recend '' -k bzip2 > \"" +
+      outFile.getFile.getAbsolutePath + "\" ;"
+
+    val camArray = collection.JavaConversions.seqAsJavaList(List( "/bin/bash", "-c", sortCommand ))
     val pb = new ProcessBuilder(camArray)
     val ret = Integer.valueOf(pb.start().waitFor())
     ret == 0
